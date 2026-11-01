@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: study-buddy
+    runtime: node
+    plan: starter            # persistent disks need a paid plan
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false          # you paste this in the Render dashboard
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: study-buddy-data
+      mountPath: /var/data
+      sizeGB: 1

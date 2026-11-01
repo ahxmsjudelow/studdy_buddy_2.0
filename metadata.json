@@ -1,0 +1,6 @@
+{
+  "name": "Study Buddy",
+  "description": "Taking learning to another step. The premier Cambridge IGCSE and secondary study platform with intelligent tutoring, past papers, audio revision, and deep reasoning.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
