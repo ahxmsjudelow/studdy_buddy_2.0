@@ -9,6 +9,8 @@ services:
     envVars:
       - key: GEMINI_API_KEY
         sync: false          # you paste this in the Render dashboard
+      - key: GROQ_API_KEY
+        sync: false
       - key: DATA_DIR
         value: /var/data
     disk:

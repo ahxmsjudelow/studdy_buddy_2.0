@@ -32,7 +32,29 @@ function getAi(): GoogleGenAI {
   return ai;
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, ai: hasKey }));
+// Groq (OpenAI-compatible API). When GROQ_API_KEY is set it handles all text features;
+// Gemini is then only used for the Google-only ones (TTS, Search/Maps grounding, video).
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const hasGroq = Boolean(GROQ_API_KEY);
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const GROQ_BASE = 'https://api.groq.com/openai/v1';
+
+type GroqMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+
+async function groqChat(messages: GroqMessage[], json = false): Promise<string> {
+  const r = await fetch(`${GROQ_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: GROQ_MODEL, messages, ...(json && { response_format: { type: 'json_object' } }) }),
+  });
+  const data: any = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Groq ${r.status}: ${data?.error?.message || r.statusText}`);
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) throw new Error('Empty response from Groq');
+  return text;
+}
+
+app.get('/api/health', (_req, res) => res.json({ ok: true, ai: hasKey || hasGroq }));
 
 function findSubject(label?: string) {
   if (!label) return undefined;
@@ -80,6 +102,11 @@ Provide an exhaustive, crystal-clear breakdown:
 4. Model Answer matching Cambridge Mark Scheme standards
 5. Common Examiner Pitfalls / Student Misconceptions
 6. Quick Check & Verification (how to check the answer in an exam room)`;
+
+    if (hasGroq) {
+      const solution = await groqChat([{ role: 'system', content: systemPrompt }, { role: 'user', content: problem }]);
+      return res.json({ success: true, solution, modelUsed: GROQ_MODEL });
+    }
 
     const response = await generateWithFallback({
       preferredModel: 'gemini-4-argon',
@@ -135,6 +162,10 @@ app.post('/api/gemini/chat', async (req, res) => {
 
     const subjectObj = findSubject(subject);
     try {
+      if (hasGroq) {
+        const reply = await groqChat([{ role: 'system', content: roleInstruction }, ...(cleaned as GroqMessage[])]);
+        return res.json({ success: true, reply, offline: false });
+      }
       const formattedContents = cleaned.map((m: { role: string; content: string }) => ({
         role: m.role === 'user' ? 'user' : 'model',
         parts: [{ text: m.content }],
@@ -263,6 +294,22 @@ app.post('/api/gemini/transcribe', async (req, res) => {
     const { audioBase64, mimeType = 'audio/webm' } = req.body;
     if (!audioBase64) {
       return res.status(400).json({ error: 'Audio base64 data required' });
+    }
+
+    if (hasGroq) {
+      const form = new FormData();
+      const ext = (mimeType.split('/')[1] || 'webm').split(';')[0];
+      form.append('file', new Blob([Buffer.from(audioBase64, 'base64')], { type: mimeType }), `audio.${ext}`);
+      form.append('model', 'whisper-large-v3-turbo');
+      form.append('prompt', 'Student question. Preserve academic terminology, equations, numbers, and subject keywords.');
+      const r = await fetch(`${GROQ_BASE}/audio/transcriptions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
+        body: form,
+      });
+      const data: any = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(`Groq ${r.status}: ${data?.error?.message || r.statusText}`);
+      return res.json({ success: true, transcript: data.text || '' });
     }
 
     const audioPart = {
@@ -437,6 +484,15 @@ app.post('/api/gemini/generate-flashcards', async (req, res) => {
     let cards: any[];
     let offline = false;
     try {
+      if (hasGroq) {
+        const raw = await groqChat(
+          [{ role: 'user', content: `${prompt}\nRespond with a JSON object {"cards": [...]} where each card has string fields front, back, hint (a brief mnemonic) and difficulty (Standard, Challenging or Expert).` }],
+          true,
+        );
+        cards = JSON.parse(raw).cards;
+        if (!Array.isArray(cards) || !cards.length) throw new Error('No cards returned');
+        return res.json({ success: true, cards, offline });
+      }
       const response = await getAi().models.generateContent({
         model: 'gemini-3.8-flash',
         contents: prompt,
@@ -524,6 +580,17 @@ Produce study assets as JSON: title, author, estimatedDuration, summary (overvie
 Base everything ONLY on the provided video or text. If you cannot access the content, say so in the summary rather than inventing details.`;
 
   try {
+    if (hasGroq) {
+      // Groq can't watch videos, so it needs the transcript/notes text.
+      if (!text) throw new Error('Groq needs a pasted transcript or notes (it cannot watch videos)');
+      const raw = await groqChat(
+        [{ role: 'user', content: `SOURCE TRANSCRIPT/NOTES:\n${text}\n\n${instructions}\nRespond with a single JSON object using exactly those keys.` }],
+        true,
+      );
+      const pack = sanitizePack(JSON.parse(raw));
+      if (!pack.notes || !pack.flashcards.length) throw new Error('Model returned an incomplete study pack');
+      return res.json({ ...base, ...pack, title: pack.title || titleHint || 'Study pack', offline: false });
+    }
     const parts: any[] = [];
     if (text) parts.push({ text: `SOURCE TRANSCRIPT/NOTES:\n${text}` });
     else if (videoId) parts.push({ fileData: { fileUri: `https://www.youtube.com/watch?v=${videoId}` } });
