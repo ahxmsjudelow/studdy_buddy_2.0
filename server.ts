@@ -36,18 +36,36 @@ function getAi(): GoogleGenAI {
 // Gemini is then only used for the Google-only ones (TTS, Search/Maps grounding, video).
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const hasGroq = Boolean(GROQ_API_KEY);
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+let GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
+const GROQ_PREFERRED = ['openai/gpt-oss-120b', 'llama-3.3-70b-versatile', 'openai/gpt-oss-20b', 'llama-3.1-8b-instant'];
 
 type GroqMessage = { role: 'system' | 'user' | 'assistant'; content: string };
 
-async function groqChat(messages: GroqMessage[], json = false): Promise<string> {
+// Groq retires models regularly; when the configured one is gone, switch to one the key can use.
+async function pickGroqModel(): Promise<string | null> {
+  const r = await fetch(`${GROQ_BASE}/models`, { headers: { Authorization: `Bearer ${GROQ_API_KEY}` } });
+  if (!r.ok) return null;
+  const ids: string[] = ((await r.json()) as any)?.data?.filter((m: any) => m.active !== false).map((m: any) => m.id) || [];
+  const chat = ids.filter((id) => !/whisper|tts|guard|orpheus|playai|compound/i.test(id));
+  return GROQ_PREFERRED.find((id) => chat.includes(id)) || chat[0] || null;
+}
+
+async function groqChat(messages: GroqMessage[], json = false, retried = false): Promise<string> {
   const r = await fetch(`${GROQ_BASE}/chat/completions`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: GROQ_MODEL, messages, ...(json && { response_format: { type: 'json_object' } }) }),
   });
   const data: any = await r.json().catch(() => ({}));
+  if (r.status === 404 && !retried) {
+    const next = await pickGroqModel();
+    if (next && next !== GROQ_MODEL) {
+      console.warn(`[Groq] model ${GROQ_MODEL} unavailable, switching to ${next}`);
+      GROQ_MODEL = next;
+      return groqChat(messages, json, true);
+    }
+  }
   if (!r.ok) throw new Error(`Groq ${r.status}: ${data?.error?.message || r.statusText}`);
   const text = data?.choices?.[0]?.message?.content;
   if (!text) throw new Error('Empty response from Groq');
