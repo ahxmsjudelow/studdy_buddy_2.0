@@ -12,5 +12,5 @@ Thumbs.db
 !.env.example
 
 # Teacher accounts & uploads
-data/
+/data/
 server.js
